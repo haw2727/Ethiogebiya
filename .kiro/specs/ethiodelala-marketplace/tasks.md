@@ -1,0 +1,376 @@
+# Implementation Plan: EthioDelala Marketplace
+
+## Overview
+
+Incremental implementation of the EthioDelala MERN marketplace. Each task builds on the previous, wiring all components together by the end. Backend is Node.js/Express (CommonJS), frontend is React 19 + Vite. Tests use Jest + Supertest + fast-check (backend) and Vitest + React Testing Library (frontend).
+
+## Tasks
+
+- [x] 1. Project setup and shared infrastructure
+  - Install backend dependencies: `bcryptjs`, `jsonwebtoken`, `redis`, `ioredis`, `node-cron`, `multer`, `cloudinary`, `socket.io`, `express-validator`, `helmet`, `express-rate-limit`, `mongoose`, `fast-check`
+  - Install frontend dependencies: `react-router-dom`, `axios`, `@reduxjs/toolkit`, `react-redux`, `bootstrap`, `socket.io-client`, `i18next`, `react-i18next`
+  - Create `backend/.env.example` with all required env vars (MONGO_URI, REDIS_URL, JWT_ACCESS_SECRET, JWT_REFRESH_SECRET, CLOUDINARY_*, TELEBIRR_*, MPESA_*, CBE_*, SMS_GATEWAY_URL, PLATFORM_COMMISSION_RATE)
+  - Create `backend/src/config/db.js` — Mongoose connection with retry logic
+  - Create `backend/src/config/redis.js` — ioredis client singleton
+  - Create `backend/src/middleware/errorHandler.js` — global Express error handler with correlation ID
+  - Create `backend/src/middleware/security.js` — helmet headers, CSRF token, input sanitization (express-validator)
+  - Wire `backend/server.js` to load config, connect DB/Redis, mount security middleware, and export `app`
+  - Set up frontend i18n: `frontend/src/i18n/en.json`, `frontend/src/i18n/am.json`, `frontend/src/i18n/index.js`
+  - Replace `frontend/src/App.jsx` with React Router shell and Redux Provider
+  - _Requirements: 23.1, 24.1, 24.2, 24.3, 24.5_
+
+- [ ] 2. Data models
+  - [x] 2.1 Create Mongoose models: User, Category, Listing, Conversation, Message, Transaction, Dispute, Notification, SavedSearch, ModerationReport, ActivityLog
+    - Implement all schemas, indexes (2dsphere, text, TTL), and virtuals as specified in the design
+    - _Requirements: 1.1, 7.1, 9.1, 10.1, 12.1, 14.1, 15.1, 18.1, 19.1_
+  - [ ]* 2.2 Write property test for User model (Property 4: bcrypt cost factor)
+    - **Property 4: Passwords are stored as bcrypt hashes with cost factor ≥ 12**
+    - **Validates: Requirements 1.5**
+  - [ ]* 2.3 Write property test for Transaction model (Property 34: Commission invariant)
+    - **Property 34: commission = amount × rate; netAmount = amount − commission**
+    - **Validates: Requirements 12.3, 12.5**
+
+- [ ] 3. Auth_Service — registration and OTP
+  - [x] 3.1 Implement `POST /api/auth/register` — validate required fields, age check, duplicate phone, broker license requirement; hash password with bcrypt cost 12; create User; trigger OTP send
+    - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6_
+  - [ ]* 3.2 Write property test for registration validation (Property 1)
+    - **Property 1: Registration rejects payloads with missing required fields or broker without license**
+    - **Validates: Requirements 1.3, 1.6**
+  - [ ]* 3.3 Write property test for duplicate phone rejection (Property 2)
+    - **Property 2: Duplicate phone registration is rejected**
+    - **Validates: Requirements 1.2**
+  - [ ]* 3.4 Write property test for under-18 rejection (Property 3)
+    - **Property 3: Under-18 registration is rejected**
+    - **Validates: Requirements 1.4**
+  - [x] 3.5 Implement OTP_Service: generate 6-digit OTP, store in Redis with TTL (24h registration / 15min reset), send via SMS gateway
+    - _Requirements: 2.1, 2.3, 2.4, 6.1, 6.3_
+  - [x] 3.6 Implement `POST /api/auth/verify-otp` — validate OTP from Redis, mark phone verified, activate account
+    - _Requirements: 2.1, 2.2, 2.3_
+  - [ ]* 3.7 Write property test for OTP verification round-trip (Property 5)
+    - **Property 5: Correct OTP activates account; incorrect OTP is rejected**
+    - **Validates: Requirements 2.1, 2.2**
+  - [ ]* 3.8 Write property test for OTP resend invalidation (Property 6)
+    - **Property 6: OTP resend invalidates previous OTP**
+    - **Validates: Requirements 2.4**
+  - [x] 3.9 Implement `POST /api/auth/resend-otp` — overwrite Redis key, re-send SMS
+    - _Requirements: 2.4_
+
+- [ ] 4. Auth_Service — login, tokens, RBAC, and account lockout
+  - [x] 4.1 Implement `POST /api/auth/login` — verify credentials, enforce lockout (5 attempts / 15 min / Redis), return JWT access (15 min) + refresh (7 days) token pair
+    - _Requirements: 4.1, 4.2, 24.4_
+  - [ ]* 4.2 Write property test for JWT token claims (Property 9)
+    - **Property 9: Login returns access token (15 min expiry) and refresh token (7 day expiry); invalid credentials return generic error**
+    - **Validates: Requirements 4.1, 4.2**
+  - [ ]* 4.3 Write property test for account lockout (Property 54)
+    - **Property 54: 5 consecutive failed logins from same IP triggers 15-minute lockout**
+    - **Validates: Requirements 24.4**
+  - [x] 4.4 Implement `POST /api/auth/refresh` — validate refresh token from Redis, issue new token pair, revoke old refresh token
+    - _Requirements: 4.3, 4.4_
+  - [ ]* 4.5 Write property test for refresh token rotation (Property 10)
+    - **Property 10: Valid refresh token returns new pair; old token is revoked**
+    - **Validates: Requirements 4.3, 4.4**
+  - [x] 4.6 Implement `POST /api/auth/logout` — revoke refresh token in Redis
+    - _Requirements: 4.5_
+  - [x] 4.7 Create `backend/src/middleware/auth.js` — JWT verification middleware and `requireRole(...roles)` RBAC middleware
+    - _Requirements: 4.6_
+  - [ ]* 4.8 Write property test for RBAC enforcement (Property 12)
+    - **Property 12: Requests from users without required role receive 403**
+    - **Validates: Requirements 4.6**
+  - [ ]* 4.9 Write property test for unverified user restrictions (Property 7)
+    - **Property 7: Unverified users are blocked from listing creation, messaging, and payments**
+    - **Validates: Requirements 2.5, 7.8**
+
+- [ ] 5. Auth_Service — profile, password change, password recovery, and National ID
+  - [x] 5.1 Implement `GET /api/auth/me` and `PUT /api/auth/me` — fetch and update profile fields; upload profile photo via Multer → Cloudinary (JPEG/PNG ≤ 2 MB)
+    - _Requirements: 5.1, 5.2, 5.3_
+  - [ ]* 5.2 Write property test for profile update round-trip (Property 13)
+    - **Property 13: Valid profile update is persisted and returned on subsequent fetch**
+    - **Validates: Requirements 5.1, 5.2**
+  - [ ]* 5.3 Write property test for profile photo upload validation (Property 14)
+    - **Property 14: Files > 2 MB or non-JPEG/PNG are rejected**
+    - **Validates: Requirements 5.3**
+  - [x] 5.4 Implement `POST /api/auth/change-password` — verify current password, hash and persist new password
+    - _Requirements: 5.4, 5.5_
+  - [ ]* 5.5 Write property test for password change round-trip (Property 15)
+    - **Property 15: Correct current password allows change; incorrect current password is rejected**
+    - **Validates: Requirements 5.4, 5.5**
+  - [x] 5.6 Implement `POST /api/auth/forgot-password` and `POST /api/auth/reset-password` — generic response for unknown phones, 15-min OTP, update password, invalidate OTP
+    - _Requirements: 6.1, 6.2, 6.3, 6.4_
+  - [ ]* 5.7 Write property test for password recovery non-enumeration (Property 16)
+    - **Property 16: Forgot-password returns same response structure for registered and unregistered phones**
+    - **Validates: Requirements 6.4**
+  - [ ]* 5.8 Write property test for password reset OTP round-trip (Property 17)
+    - **Property 17: Valid reset OTP updates password and is invalidated after use**
+    - **Validates: Requirements 6.2**
+  - [x] 5.9 Implement `POST /api/auth/upload-id` — accept JPEG/PNG ≤ 5 MB via Multer → Cloudinary, set verificationStatus to "pending"
+    - _Requirements: 3.1, 3.5_
+  - [ ]* 5.10 Write property test for National ID upload (Property 8)
+    - **Property 8: Valid ID upload sets status to "pending"; oversized/wrong-format files are rejected**
+    - **Validates: Requirements 3.1, 3.5_
+  - [x] 5.11 Implement ActivityLog middleware — log login, listing, and payment events; TTL index enforces 90-day retention
+    - _Requirements: 5.6_
+
+- [x] 6. Checkpoint — Ensure all auth tests pass
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [ ] 7. Listing_Service — creation and media upload
+  - [x] 7.1 Implement `POST /api/listings` — validate required fields, category-specific fields (real estate / automotive), duplicate detection; upload images (JPEG/PNG ≤ 10 MB, up to 10) and optional video (MP4 ≤ 100 MB) via Multer → Cloudinary; persist listing with status "active" and expiresAt = now + 30 days
+    - _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5, 7.6, 7.7, 7.8_
+  - [ ]* 7.2 Write property test for listing creation (Property 18)
+    - **Property 18: Verified seller/broker with valid payload produces active listing**
+    - **Validates: Requirements 7.1, 7.2, 7.3**
+  - [ ]* 7.3 Write property test for image upload validation (Property 19)
+    - **Property 19: Valid images are stored; invalid images are rejected without discarding valid ones**
+    - **Validates: Requirements 7.4, 7.5**
+  - [ ]* 7.4 Write property test for duplicate listing detection (Property 20)
+    - **Property 20: Same title + price from same owner triggers duplicate warning**
+    - **Validates: Requirements 7.7**
+
+- [ ] 8. Listing_Service — management, expiry, and renewal
+  - [x] 8.1 Implement `GET /api/listings/:id`, `PUT /api/listings/:id`, `DELETE /api/listings/:id`, `PATCH /api/listings/:id/status`, `GET /api/listings/my`
+    - Enforce ownership for edit/delete; delete removes Cloudinary assets; status transitions: active ↔ inactive, expired → active on renewal
+    - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 8.7_
+  - [ ]* 8.2 Write property test for listing ownership authorization (Property 21)
+    - **Property 21: Non-owner edit/delete attempts receive 403**
+    - **Validates: Requirements 8.5**
+  - [ ]* 8.3 Write property test for deactivate/reactivate round-trip (Property 22)
+    - **Property 22: Deactivated listing excluded from search; reactivated listing included**
+    - **Validates: Requirements 8.3, 8.4**
+  - [ ]* 8.4 Write property test for listing deletion (Property 23)
+    - **Property 23: Deleted listing returns 404 on subsequent fetch**
+    - **Validates: Requirements 8.2**
+  - [ ]* 8.5 Write property test for expired listing renewal (Property 24)
+    - **Property 24: Renewing expired listing sets status to "active" and resets expiresAt to now + 30 days**
+    - **Validates: Requirements 8.7**
+  - [x] 8.6 Implement node-cron daily expiry job — find listings where expiresAt < now and status = "active", set to "expired", enqueue expiry notifications
+    - _Requirements: 8.6, 11.4_
+
+- [ ] 9. Search_Engine
+  - [x] 9.1 Implement `GET /api/search` — MongoDB text index keyword search, filter by category/price/region/status, geo-radius via `$geoWithin $centerSphere`, boost featured listings, include related listings secondary set, increment viewCount on detail fetch
+    - _Requirements: 9.1, 9.2, 9.3, 9.5, 9.6, 9.7_
+  - [ ]* 9.2 Write property test for keyword search correctness (Property 25)
+    - **Property 25: All returned listings are active and contain the keyword in title or description**
+    - **Validates: Requirements 9.1**
+  - [ ]* 9.3 Write property test for filter search correctness (Property 26)
+    - **Property 26: All returned listings satisfy every applied filter and have status "active"**
+    - **Validates: Requirements 9.2, 9.6**
+  - [ ]* 9.4 Write property test for geo-radius search (Property 27)
+    - **Property 27: All returned listings are within the specified radius, sorted by ascending distance**
+    - **Validates: Requirements 9.3**
+  - [ ]* 9.5 Write property test for view count increment (Property 29)
+    - **Property 29: Fetching listing detail increments viewCount by exactly 1**
+    - **Validates: Requirements 9.7**
+  - [x] 9.6 Implement `POST /api/search/saved`, `GET /api/search/saved`, `DELETE /api/search/saved/:id` — persist and retrieve SavedSearch documents
+    - _Requirements: 9.4_
+  - [ ]* 9.7 Write property test for saved search round-trip (Property 28)
+    - **Property 28: Saved search parameters are retrievable exactly as saved**
+    - **Validates: Requirements 9.4**
+
+- [x] 10. Checkpoint — Ensure all listing and search tests pass
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [ ] 11. Messaging_Service and real-time Socket.io
+  - [x] 11.1 Implement `POST /api/conversations`, `GET /api/conversations`, `GET /api/conversations/:id/messages`, `POST /api/conversations/:id/messages`
+    - Persist messages to MongoDB before socket delivery; paginate message history
+    - _Requirements: 10.1, 10.2, 10.3, 10.8_
+  - [x] 11.2 Set up Socket.io server with Redis adapter — handle `message:send`, `message:receive`, `conversation:typing`, `notification:new` events; deliver queued messages on reconnect
+    - _Requirements: 10.1, 10.2, 10.3_
+  - [x] 11.3 Implement `POST /api/users/:id/block` and `DELETE /api/users/:id/block` — update blockedUsers array; silently discard messages from blocked users (return 200 to sender)
+    - _Requirements: 10.6, 10.7_
+  - [x] 11.4 Implement message attachment upload — Multer → Cloudinary (image/document ≤ 10 MB), include URL in message payload; strip phone/email from message body
+    - _Requirements: 10.4, 10.5_
+  - [ ]* 11.5 Write property test for message persistence and retrieval (Property 30)
+    - **Property 30: Sent messages are persisted and retrievable regardless of recipient online status**
+    - **Validates: Requirements 10.2, 10.3**
+  - [ ]* 11.6 Write property test for message privacy (Property 31)
+    - **Property 31: Message payloads do not expose sender/recipient phone or email**
+    - **Validates: Requirements 10.5**
+  - [ ]* 11.7 Write property test for block prevents message delivery (Property 32)
+    - **Property 32: Messages from blocked users are silently discarded**
+    - **Validates: Requirements 10.6, 10.7**
+
+- [ ] 12. Notification_Service
+  - [x] 12.1 Implement Notification_Service module — create in-app Notification documents for: new message, new offer, payment events, verification status change, listing expiry warning (3 days before)
+    - _Requirements: 11.1, 11.2, 11.3, 11.4, 11.5_
+  - [x] 12.2 Integrate SMS dispatch for payment and verification events — call SMS gateway with retry (3 attempts, exponential backoff)
+    - _Requirements: 11.3, 11.5_
+  - [ ]* 12.3 Write property test for notification creation on events (Property 33)
+    - **Property 33: Triggering events (message, offer, payment, verification) create in-app notification for affected user**
+    - **Validates: Requirements 11.1, 11.2, 11.3, 11.5**
+
+- [ ] 13. Payment_Service — core payment flow
+  - [x] 13.1 Implement `POST /api/payments/initiate` — create pending Transaction, call selected gateway (Telebirr/M-Pesa/CBE Birr) API, return pending record
+    - _Requirements: 12.1, 12.2_
+  - [x] 13.2 Implement `POST /api/payments/webhook/:gateway` — verify gateway signature, update transaction status to "completed" or "failed", calculate commission (integer arithmetic), notify buyer and seller
+    - _Requirements: 12.3, 12.4, 12.5_
+  - [ ]* 13.3 Write property test for commission invariant (Property 34)
+    - **Property 34: commission = amount × rate; netAmount = amount − commission; no rounding error beyond 2 decimal places**
+    - **Validates: Requirements 12.3, 12.5**
+  - [x] 13.4 Implement `GET /api/payments/:id/receipt` — generate receipt JSON with all required fields; `GET /api/payments/history` — paginated transaction history (5-year retention)
+    - _Requirements: 12.6, 12.7_
+  - [ ]* 13.5 Write property test for receipt completeness (Property 35)
+    - **Property 35: Receipt contains transaction ID, amount, commission, net amount, timestamp, buyer identity, seller identity**
+    - **Validates: Requirements 12.6**
+  - [x] 13.6 Implement `POST /api/admin/payments/:id/manual` — admin manual transaction verification
+    - _Requirements: 12.8_
+
+- [ ] 14. Payment_Service — escrow and disputes
+  - [x] 14.1 Implement `POST /api/escrow/initiate`, `POST /api/escrow/:id/confirm`, `POST /api/escrow/:id/dispute` — escrow state machine: pending → escrowed → released / disputed; auto-release after 7 days if only buyer confirms
+    - _Requirements: 13.1, 13.2, 13.3, 13.4, 13.5_
+  - [ ]* 14.2 Write property test for escrow state transitions (Property 36)
+    - **Property 36: Initiate → escrowed; both confirm → released; dispute → disputed**
+    - **Validates: Requirements 13.1, 13.2, 13.4**
+  - [x] 14.3 Implement `POST /api/disputes` — create Dispute record within 14-day window; reject if outside window; `GET /api/disputes/:id`; evidence submission with file ≤ 10 MB
+    - _Requirements: 14.1, 14.2, 14.4_
+  - [ ]* 14.4 Write property test for dispute creation eligibility window (Property 37)
+    - **Property 37: Dispute within 14 days is accepted; after 14 days is rejected**
+    - **Validates: Requirements 14.1, 14.2**
+  - [ ]* 14.5 Write property test for dispute evidence validation (Property 38)
+    - **Property 38: Evidence file > 10 MB is rejected; valid evidence is accepted**
+    - **Validates: Requirements 14.4**
+
+- [x] 15. Checkpoint — Ensure all payment and messaging tests pass
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [ ] 16. Premium subscriptions and featured listings
+  - [x] 16.1 Implement subscription endpoints — `POST /api/subscriptions` (initiate payment → activate), `DELETE /api/subscriptions` (cancel with 24h rule), renewal cron job (auto-charge or downgrade on failure)
+    - _Requirements: 15.1, 15.3, 15.4, 15.5, 15.6_
+  - [ ]* 16.2 Write property test for subscription activation (Property 39)
+    - **Property 39: Completed subscription payment immediately grants premium access**
+    - **Validates: Requirements 15.1, 15.2**
+  - [ ]* 16.3 Write property test for subscription cancellation state (Property 40)
+    - **Property 40: Cancellation ≥ 24h before renewal marks for non-renewal; access retained until period end**
+    - **Validates: Requirements 15.4**
+  - [ ]* 16.4 Write property test for subscription downgrade on payment failure (Property 41)
+    - **Property 41: Failed renewal notifies broker and downgrades within 24 hours**
+    - **Validates: Requirements 15.6**
+  - [x] 16.5 Implement featured listing endpoints — `PATCH /api/listings/:id/feature` (requires active subscription, max 5 featured); cron job to unfeature listings when subscription expires
+    - _Requirements: 16.1, 16.3_
+  - [ ]* 16.6 Write property test for featured listing ordering invariant (Property 42)
+    - **Property 42: Featured listings appear before non-featured within the same relevance tier**
+    - **Validates: Requirements 16.2**
+  - [ ]* 16.7 Write property test for inactive subscription prevents featuring (Property 43)
+    - **Property 43: Inactive subscription rejects new featuring and unfeatures existing listings**
+    - **Validates: Requirements 16.3**
+  - [x] 16.8 Implement `GET /api/analytics/listings` and `GET /api/analytics/aggregate` — per-listing and aggregate analytics for active-subscription brokers; return 403 for expired subscriptions
+    - _Requirements: 17.1, 17.2, 17.3_
+  - [ ]* 16.9 Write property test for analytics access control (Property 44)
+    - **Property 44: Active subscription returns analytics; expired subscription returns 403**
+    - **Validates: Requirements 17.1, 17.2, 17.3**
+
+- [ ] 17. Admin_Panel API
+  - [x] 17.1 Implement user management endpoints — `GET /api/admin/users` (search by phone/name/ID, paginated), `PATCH /api/admin/users/:id/suspend` (revoke sessions), `PATCH /api/admin/users/:id/reinstate`, `DELETE /api/admin/users/:id` (anonymize PII, retain transactions)
+    - _Requirements: 18.1, 18.2, 18.3, 18.4_
+  - [ ]* 17.2 Write property test for user suspension round-trip (Property 45)
+    - **Property 45: Suspended account cannot log in; reinstated account can log in**
+    - **Validates: Requirements 18.2, 18.3**
+  - [ ]* 17.3 Write property test for account anonymization (Property 46)
+    - **Property 46: Deleted user has PII replaced with placeholders; transaction records remain intact**
+    - **Validates: Requirements 18.4**
+  - [ ]* 17.4 Write property test for admin user search (Property 47)
+    - **Property 47: Admin search returns only records matching the query criteria**
+    - **Validates: Requirements 18.1**
+  - [x] 17.5 Implement verification queue — `GET /api/admin/verifications` (paginated, sortable), `PATCH /api/admin/verifications/:id` (approve → "verified" / reject → "rejected" + notify user)
+    - _Requirements: 3.2, 3.3, 18.5_
+  - [x] 17.6 Implement content moderation — `GET /api/admin/reports` (queue, sortable), `PATCH /api/admin/reports/:id` (action + close); `POST /api/listings/:id/report` and `POST /api/messages/:id/report` for user reports
+    - _Requirements: 19.1, 19.2, 19.3, 19.4_
+  - [ ]* 17.7 Write property test for content moderation state transitions (Property 48)
+    - **Property 48: Flagged listing status set to "removed" and owner notified; user report creates moderation record**
+    - **Validates: Requirements 19.1, 19.2, 19.3**
+  - [x] 17.8 Implement analytics dashboard — `GET /api/admin/analytics` (active users, listings, transactions, commission — updated within 1 hour), `GET /api/admin/analytics/export` (CSV), date-range report
+    - _Requirements: 20.1, 20.2, 20.3_
+  - [ ]* 17.9 Write property test for analytics date range correctness (Property 49)
+    - **Property 49: All data points in a date-range report fall within the specified range**
+    - **Validates: Requirements 20.2**
+  - [x] 17.10 Implement category management — `GET/POST /api/admin/categories`, `PUT /api/admin/categories/:id`, `PATCH /api/admin/categories/:id/status`; new fields apply to new listings only; deactivated category blocks new listings
+    - _Requirements: 21.1, 21.2, 21.3_
+  - [ ]* 17.11 Write property test for category management lifecycle (Property 50)
+    - **Property 50: New category available immediately; field updates don't affect existing listings; deactivation blocks new listings**
+    - **Validates: Requirements 21.1, 21.2, 21.3**
+
+- [x] 18. Checkpoint — Ensure all admin and subscription tests pass
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [ ] 19. Security hardening
+  - [x] 19.1 Add `express-rate-limit` to all public endpoints; configure `helmet` with CSP, X-Frame-Options, X-Content-Type-Options, HSTS; add `express-mongo-sanitize` and `xss-clean` middleware
+    - _Requirements: 24.1, 24.2, 24.3, 24.5_
+  - [ ]* 19.2 Write property test for input sanitization (Property 53)
+    - **Property 53: XSS payloads and NoSQL injection patterns are sanitized or rejected**
+    - **Validates: Requirements 24.2**
+  - [ ]* 19.3 Write property test for security headers (Property 55)
+    - **Property 55: All API responses include CSP, X-Frame-Options, X-Content-Type-Options, and HSTS headers**
+    - **Validates: Requirements 24.5**
+
+- [ ] 20. Multilingual support
+  - [x] 20.1 Complete `frontend/src/i18n/en.json` and `frontend/src/i18n/am.json` with all UI labels, error messages, and notification strings; wire `react-i18next` throughout all components
+    - _Requirements: 23.1, 23.2, 23.3_
+  - [x] 20.2 Implement language preference persistence — save `preferredLanguage` to user profile on change; load on login
+    - _Requirements: 23.2_
+  - [ ]* 20.3 Write property test for i18n key completeness (Property 51)
+    - **Property 51: Every i18n key has non-empty "en" and "am" translations**
+    - **Validates: Requirements 23.1**
+  - [ ]* 20.4 Write property test for language preference persistence (Property 52)
+    - **Property 52: Setting preferred language is returned on subsequent profile fetch**
+    - **Validates: Requirements 23.2**
+
+- [ ] 21. Frontend — auth and profile pages
+  - [x] 21.1 Create Redux slices: `authSlice` (user, tokens, loading), `listingsSlice`, `messagesSlice`, `notificationsSlice`; configure Redux store with Redux Toolkit
+    - _Requirements: 4.1, 4.6_
+  - [x] 21.2 Build Register, Login, VerifyOTP, ForgotPassword, and ResetPassword pages with form validation, error display, and i18n labels
+    - _Requirements: 1.1, 2.1, 6.1_
+  - [x] 21.3 Build Profile page — edit fields, upload photo, change password, upload National ID, display verification badge
+    - _Requirements: 3.1, 5.1, 5.2, 5.3, 5.4_
+  - [x] 21.4 Implement protected route wrapper — redirect unauthenticated users to login; redirect users without required role to 403 page
+    - _Requirements: 4.6_
+  - [ ]* 21.5 Write Vitest component tests for Register and Login forms
+    - Test validation feedback, error messages, and i18n key rendering
+    - _Requirements: 1.3, 4.2_
+
+- [ ] 22. Frontend — listings and search pages
+  - [x] 22.1 Build CreateListing and EditListing pages — dynamic category-specific fields, multi-image upload with preview, video upload, duplicate warning modal
+    - _Requirements: 7.1, 7.2, 7.3, 7.4, 7.7_
+  - [x] 22.2 Build ListingDetail page — image gallery, view count display, contact seller button, report listing button
+    - _Requirements: 9.7, 19.2_
+  - [x] 22.3 Build Search page — keyword input, category/price/region filters, geo-radius toggle (Google Maps), results grid with featured badge, related listings section, save search button
+    - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5, 9.6_
+  - [x] 22.4 Build MyListings page — list with status badges, deactivate/reactivate/renew/delete actions
+    - _Requirements: 8.1, 8.3, 8.4, 8.7_
+  - [ ]* 22.5 Write Vitest component tests for Search page filters and ListingDetail view count
+    - _Requirements: 9.1, 9.7_
+
+- [ ] 23. Frontend — messaging, notifications, and payments
+  - [x] 23.1 Build Conversations list and Chat page — Socket.io client integration, typing indicator, attachment upload, block user button, offline message delivery on reconnect
+    - _Requirements: 10.1, 10.2, 10.3, 10.4, 10.6_
+  - [x] 23.2 Build Notifications panel — real-time in-app notifications via Socket.io `notification:new`, mark as read, notification list
+    - _Requirements: 11.1, 11.2, 11.3_
+  - [x] 23.3 Build Payment flow pages — gateway selection (Telebirr/M-Pesa/CBE Birr), payment confirmation, receipt download, transaction history
+    - _Requirements: 12.1, 12.2, 12.6, 12.7_
+  - [x] 23.4 Build Escrow flow pages — initiate escrow, confirm completion, raise dispute, dispute evidence submission
+    - _Requirements: 13.1, 13.2, 14.1, 14.4_
+  - [ ]* 23.5 Write Vitest component tests for Chat page and Notifications panel
+    - Test Redux state transitions and Socket.io event handling with mocks
+    - _Requirements: 10.2, 11.1_
+
+- [ ] 24. Frontend — broker dashboard and admin panel
+  - [x] 24.1 Build Broker Dashboard — subscription management (subscribe, cancel), featured listing toggle (max 5), analytics charts (views, inquiries, offers per listing and aggregate)
+    - _Requirements: 15.1, 15.4, 16.1, 17.1, 17.2_
+  - [x] 24.2 Build Admin Panel pages — user management table (search, suspend, reinstate, delete), verification queue, moderation report queue, analytics dashboard with CSV export, category management CRUD
+    - _Requirements: 18.1, 18.2, 18.3, 18.4, 18.5, 19.1, 19.3, 20.1, 20.3, 21.1_
+  - [ ]* 24.3 Write Vitest component tests for Admin user management table and analytics dashboard
+    - _Requirements: 18.1, 20.1_
+
+- [ ] 25. USSD handler
+  - [x] 25.1 Implement `POST /api/ussd` — parse USSD session state, present menu (search by category/region, view listing summary, initiate contact), integrate with Ethio Telecom USSD gateway
+    - _Requirements: 26.1_
+
+- [x] 26. Final checkpoint — Ensure all tests pass
+  - Ensure all tests pass, ask the user if questions arise.
+
+## Notes
+
+- Tasks marked with `*` are optional and can be skipped for a faster MVP
+- Each task references specific requirements for traceability
+- Property tests use fast-check with `numRuns: 100` minimum; tag format: `// Feature: ethiodelala-marketplace, Property N: <text>`
+- Frontend tests use `npx vitest --run`; backend tests use `npx jest --runInBand`
+- Commission arithmetic uses integer math (amounts in santim) to avoid floating-point errors
+- All file uploads go through Multer → Cloudinary; never store binaries in MongoDB
